@@ -1,6 +1,13 @@
-// Locally synthesized effects; station speech uses an available device voice.
+import { createRecordedVoice } from "./RecordedVoice.js";
+import { speedLimit } from "./game.js";
+// Local sound effects and bundled Bangladeshi Bengali neural announcements.
 export function createAudio() {
   let ctx,
+    recorded,
+    wasBoarding = false,
+    completedSession = -1,
+    voicedCrossing = null,
+    lastSpeedWarning = -Infinity,
     engine,
     engineGain,
     noiseGain,
@@ -53,6 +60,8 @@ export function createAudio() {
         brakeGain.gain.value = 0;
         brake.connect(brakeGain).connect(ctx.destination);
         brake.start();
+        recorded = createRecordedVoice(ctx);
+        recorded.preload();
       } catch {
         ctx = null;
       }
@@ -73,6 +82,13 @@ export function createAudio() {
       o.start();
       o.stop(ctx.currentTime + duration);
     },
+    say(key, g, interrupt = false) {
+      if (!this.enabled || !recorded) return;
+      recorded.play(key, { interrupt,
+        onStart: () => { g.voiceStatus = "বাংলা AI কণ্ঠ চালু"; },
+        onError: () => { g.voiceStatus = "অডিও লোড হয়নি—ইন্টারনেট সংযোগ দেখে আবার চেষ্টা করুন।"; },
+      });
+    },
     announce(g, approaching = false) {
       if (!this.enabled) return;
       const s = g.stops[g.next];
@@ -80,6 +96,7 @@ export function createAudio() {
         ? `সামনে ${s.bn} স্টেশন। গতি কমিয়ে থামুন।`
         : `যাত্রীদের দৃষ্টি আকর্ষণ করছি। ${s.bn} স্টেশন। সাবধানে ওঠানামা করুন।`;
       g.announcement = text;
+      if (recorded) { this.say(approaching ? "station-ahead" : "arrival", g, true); return; }
       if (!window.speechSynthesis) { g.voiceStatus = "এই ব্রাউজারে কণ্ঠ ঘোষণা নেই।"; return; }
       window.speechSynthesis.cancel();
       speaking = false;
@@ -103,9 +120,22 @@ export function createAudio() {
       if (lastSession !== g.session) {
         window.speechSynthesis?.cancel();
         speaking = false;
+        recorded?.cancel();
+        wasBoarding = false;
+        voicedCrossing = null;
+        lastSpeedWarning = -Infinity;
         lastSession = g.session;
+        if (g.started && !g.paused) this.say(g.restarts > 0 ? "station-missed" : "welcome", g, true);
       }
       if (!ctx) return;
+      if (!this.enabled || !g.started || g.paused) recorded?.cancel();
+      const audible = this.enabled && g.started && !g.paused;
+      if (audible && g.complete && completedSession !== g.session) {
+        completedSession = g.session;
+        this.say("journey-complete", g, true);
+      }
+      if (audible && wasBoarding && !g.boarding && !g.complete) this.say("boarding-complete", g, true);
+      wasBoarding = g.boarding > 0;
       const active = this.enabled && g.started && !g.paused && !g.complete,
         b = Math.max(g.brake ? 1 : 0, g.brakeLevel || 0);
       engineGain.gain.setTargetAtTime(
@@ -146,6 +176,14 @@ export function createAudio() {
       if (active && Math.abs(crossingZ-g.z)<100 && ctx.currentTime-lastCrossing>.8) {
         this.tone(880,.012,.18); lastCrossing=ctx.currentTime;
       }
+      if (active && crossingZ - g.z > 0 && crossingZ - g.z < 100 && voicedCrossing !== crossingZ && !recorded?.busy) {
+        voicedCrossing = crossingZ;
+        this.say("crossing", g);
+      }
+      if (active && g.speed > speedLimit(g) + 2 && ctx.currentTime - lastSpeedWarning > 20 && !recorded?.busy) {
+        lastSpeedWarning = ctx.currentTime;
+        this.say("overspeed", g);
+      }
       if (!active && speaking) {
         window.speechSynthesis?.cancel();
         speaking = false;
@@ -166,6 +204,7 @@ export function createAudio() {
       [185, 247, 311].forEach((f) => this.tone(f, 0.02, 1.3, "sawtooth"));
     },
     stop() {
+      recorded?.cancel();
       ctx?.close();
       if (speaking) window.speechSynthesis?.cancel();
     },
